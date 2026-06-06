@@ -65,6 +65,10 @@ class DouyinParser(BaseParser):
         hostname = urlparse(url).hostname or ""
         return hostname == "iesdouyin.com" or hostname.endswith(".iesdouyin.com")
 
+    def _has_ttwid(self) -> bool:
+        cookies = self.cookiejar.get(domain="iesdouyin.com") or {}
+        return bool(cookies.get("ttwid"))
+
     # https://v.douyin.com/_2ljF4AmKL8
     @handle("v.douyin", r"v\.douyin\.com/[a-zA-Z0-9_\-]+")
     @handle("jx.douyin", r"jx\.douyin\.com/[a-zA-Z0-9_\-]+")
@@ -111,7 +115,7 @@ class DouyinParser(BaseParser):
         return f"https://m.douyin.com/share/{ty}/{vid}/"
 
     async def ensure_ttwid(self) -> None:
-        if self.cookiejar.get(domain="iesdouyin.com").get("ttwid"):
+        if self._has_ttwid():
             return
 
         logger.debug("[抖音] 当前缺少匿名 ttwid，尝试注册")
@@ -135,7 +139,6 @@ class DouyinParser(BaseParser):
                 self.TTWID_REGISTER_URL,
                 json=payload,
                 headers=headers,
-                ssl=False,
             ) as resp:
                 if resp.status >= 400:
                     raise ParseException(f"ttwid register status: {resp.status}")
@@ -143,7 +146,7 @@ class DouyinParser(BaseParser):
                 self.cookiejar.update_from_response(set_cookie_headers)
                 self._set_cookies()
                 body = await resp.json(content_type=None)
-        except (ClientError, ValueError) as e:
+        except (ClientError, TimeoutError, ValueError) as e:
             raise ParseException("ttwid register failed") from e
 
         if not isinstance(body, dict):
@@ -157,24 +160,23 @@ class DouyinParser(BaseParser):
                     callback_url,
                     headers=callback_headers,
                     allow_redirects=False,
-                    ssl=False,
                 ) as resp:
                     if resp.status >= 400:
                         raise ParseException(f"ttwid callback status: {resp.status}")
                     set_cookie_headers = resp.headers.getall("Set-Cookie", [])
                     self.cookiejar.update_from_response(set_cookie_headers)
                     self._set_cookies()
-            except ClientError as e:
+            except (ClientError, TimeoutError) as e:
                 raise ParseException("ttwid callback failed") from e
 
-        if not self.cookiejar.get(domain="iesdouyin.com").get("ttwid"):
+        if not self._has_ttwid():
             raise ParseException("ttwid register returned no cookie")
 
     async def parse_with_redirect(self, url: str) -> "ParseResult":
         """先重定向再解析，并更新 cookies"""
         logger.debug(f"[抖音] 短链重定向请求: {url}")
         async with self.session.get(
-            url, headers=self.ios_headers, allow_redirects=False, ssl=False
+            url, headers=self.ios_headers, allow_redirects=False
         ) as resp:
             logger.debug(f"[抖音] 短链重定向响应状态码: {resp.status}")
             # 从响应中提取 Set-Cookie 并更新
@@ -198,7 +200,7 @@ class DouyinParser(BaseParser):
         await self.ensure_ttwid()
         share_headers = self._sync_headers_for_url(url)
         async with self.session.get(
-            url, headers=share_headers, allow_redirects=False, ssl=False
+            url, headers=share_headers, allow_redirects=False
         ) as resp:
             if resp.status != 200:
                 raise ParseException(f"status: {resp.status}")
@@ -299,7 +301,6 @@ class DouyinParser(BaseParser):
                     play_url,
                     headers=headers,
                     allow_redirects=True,
-                    ssl=False,
                 ) as resp:
                     if resp.status >= 400:
                         logger.debug(
@@ -311,7 +312,7 @@ class DouyinParser(BaseParser):
                         logger.debug(f"[抖音] ratio={ratio} 未拿到有效文件大小")
                         continue
                     final_url = str(resp.url)
-            except ClientError as e:
+            except (ClientError, TimeoutError) as e:
                 logger.debug(f"[抖音] ratio={ratio} 探测请求失败: {e}")
                 continue
 
@@ -344,7 +345,7 @@ class DouyinParser(BaseParser):
         }
         logger.debug(f"[抖音] 请求参数: {params}")
         async with self.session.get(
-            url, params=params, headers=self.android_headers, ssl=False
+            url, params=params, headers=self.android_headers
         ) as resp:
             logger.debug(f"[抖音] 幻灯片API响应状态码: {resp.status}")
             resp.raise_for_status()
